@@ -4,7 +4,9 @@
 """
 
 import os
-from flask import Flask, render_template, jsonify, request
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from flask import Flask, render_template, jsonify, request, Response
 from flask_cors import CORS
 from dotenv import load_dotenv
 
@@ -20,6 +22,23 @@ engine = DebateEngine()
 
 # 内存中缓存分析会话（简单实现）
 _sessions = {}
+
+# 股票数据缓存（5分钟TTL）
+_stock_cache = {}
+STOCK_CACHE_TTL = 300  # 5分钟
+
+# 会话管理
+SESSION_TTL = 1800  # 30分钟过期
+
+
+def _cleanup_sessions():
+    """清理过期会话"""
+    now = time.time()
+    expired = [k for k, v in _sessions.items() if now - v.get("timestamp", 0) > SESSION_TTL]
+    for k in expired:
+        del _sessions[k]
+    if expired:
+        print(f"[会话清理] 已清理 {len(expired)} 个过期会话")
 
 
 @app.route("/")
@@ -52,21 +71,30 @@ def get_investors():
 
 @app.route("/api/step1-stock-data", methods=["POST"])
 def step1_stock_data():
-    """第1步：获取股票数据"""
+    """第1步：获取股票数据（带缓存）"""
+    _cleanup_sessions()
     data = request.get_json()
     symbol = data.get("symbol", "").strip().upper()
     if not symbol:
         return jsonify({"error": "请输入股票代码"}), 400
 
-    stock_data = engine.fetch_stock_data(symbol)
+    # 检查缓存
+    cached = _stock_cache.get(symbol)
+    if cached and (time.time() - cached["timestamp"]) < STOCK_CACHE_TTL:
+        stock_data = cached["data"]
+    else:
+        stock_data = engine.fetch_stock_data(symbol)
+        _stock_cache[symbol] = {"data": stock_data, "timestamp": time.time()}
+
     session_id = symbol
-    _sessions[session_id] = {"stock_data": stock_data}
+    _sessions[session_id] = {"stock_data": stock_data, "timestamp": time.time()}
     return jsonify({"symbol": symbol, "stock_data": stock_data})
 
 
 @app.route("/api/step2-analyses", methods=["POST"])
 def step2_analyses():
-    """第2步：7位大师独立分析"""
+    """第2步：7位大师独立分析（并行）"""
+    _cleanup_sessions()
     data = request.get_json()
     symbol = data.get("symbol", "").strip().upper()
 
@@ -75,21 +103,42 @@ def step2_analyses():
 
     stock_data = _sessions[symbol]["stock_data"]
     analyses = []
-    for inv in INVESTORS:
-        result = engine.analyze_single_investor(inv, stock_data)
-        analyses.append(result)
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            executor.submit(engine.analyze_single_investor, inv, stock_data): inv
+            for inv in INVESTORS
+        }
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                analyses.append(result)
+            except Exception as e:
+                inv = futures[future]
+                analyses.append({
+                    "investor_id": inv["id"],
+                    "name": inv["name"],
+                    "name_en": inv.get("name_en", ""),
+                    "emoji": inv["emoji"],
+                    "faction": inv["faction"],
+                    "faction_color": inv["faction_color"],
+                    "tagline": inv.get("tagline", ""),
+                    "analysis": f"[分析失败: {str(e)}]",
+                })
 
     # 按阵营排序
     faction_order = {"价值派": 0, "指数派": 1, "交易派": 2, "杠杆派": 3}
     analyses.sort(key=lambda x: (faction_order.get(x["faction"], 99), x["investor_id"]))
 
     _sessions[symbol]["analyses"] = analyses
+    _sessions[symbol]["timestamp"] = time.time()
     return jsonify({"analyses": analyses})
 
 
 @app.route("/api/step3-debate", methods=["POST"])
 def step3_debate():
     """第3步：三轮辩论"""
+    _cleanup_sessions()
     data = request.get_json()
     symbol = data.get("symbol", "").strip().upper()
     round_num = data.get("round", 1)
@@ -99,11 +148,14 @@ def step3_debate():
 
     analyses = _sessions[symbol]["analyses"]
     topic = DEBATE_TOPICS[round_num - 1]
-    debate_round = engine.run_debate_round(topic, analyses, round_num)
+    prev_rounds = _sessions[symbol].get("debates", [])  # 传入前几轮辩论
+
+    debate_round = engine.run_debate_round(topic, analyses, round_num, prev_rounds=prev_rounds)
 
     if "debates" not in _sessions[symbol]:
         _sessions[symbol]["debates"] = []
     _sessions[symbol]["debates"].append(debate_round)
+    _sessions[symbol]["timestamp"] = time.time()
 
     return jsonify(debate_round)
 
@@ -111,6 +163,7 @@ def step3_debate():
 @app.route("/api/step4-summary", methods=["POST"])
 def step4_summary():
     """第4步：生成最终总结"""
+    _cleanup_sessions()
     data = request.get_json()
     symbol = data.get("symbol", "").strip().upper()
 
@@ -125,6 +178,44 @@ def step4_summary():
     )
 
     return jsonify({"summary": summary})
+
+
+@app.route("/api/step4-summary-stream", methods=["POST"])
+def step4_summary_stream():
+    """第4步：流式生成最终总结（SSE）"""
+    data = request.get_json()
+    symbol = data.get("symbol", "").strip().upper()
+
+    if symbol not in _sessions:
+        return jsonify({"error": "会话不存在"}), 400
+
+    session = _sessions[symbol]
+
+    def generate():
+        import json as _json
+        # 先发送元信息
+        meta = {
+            "type": "meta",
+            "symbol": symbol,
+            "name": session.get("stock_data", {}).get("name", symbol),
+        }
+        yield f"data: {_json.dumps(meta, ensure_ascii=False)}\n\n"
+
+        # 流式发送总结内容
+        for token in engine.generate_final_summary_stream(
+            symbol,
+            session.get("stock_data", {}),
+            session.get("debates", []),
+        ):
+            yield f"data: {_json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
+
+        yield "data: {\"type\": \"done\"}\n\n"
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.route("/api/analyze", methods=["POST"])

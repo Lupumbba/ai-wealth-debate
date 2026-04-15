@@ -53,6 +53,68 @@ class DebateEngine:
         except Exception as e:
             return f"[分析失败: {str(e)}]"
 
+    def _call_model_stream(self, system_prompt: str, user_prompt: str, temperature: float = 0.7, max_tokens: int = 800):
+        """流式调用 DeepSeek 模型，返回生成器"""
+        try:
+            client = self._get_client()
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+            for chunk in response:
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    yield delta.content
+        except Exception as e:
+            yield f"[分析失败: {str(e)}]"
+
+    def _extract_json(self, text: str) -> dict:
+        """从 AI 输出中提取 JSON，多层容错"""
+        text = text.strip()
+
+        # 1. 去除 markdown 代码块包裹
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            if text.startswith("json"):
+                text = text[4:].strip()
+
+        # 2. 尝试直接解析
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # 3. 提取第一个 { 到最后一个 } 之间的内容
+        import re
+        match = re.search(r'\{[\s\S]*\}', text)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+
+        # 4. 最后手段：让 AI 自己修复
+        try:
+            fix_prompt = f"以下文本应该是一个合法的 JSON 对象，但格式有误。请只输出修正后的 JSON，不要输出其他内容：\n\n{text[:1000]}"
+            fixed = self._call_model(
+                system_prompt="你是一个 JSON 修复工具，只输出合法 JSON。",
+                user_prompt=fix_prompt,
+                temperature=0.1,
+                max_tokens=2000,
+            )
+            fixed = fixed.strip()
+            if fixed.startswith("```"):
+                fixed = fixed.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            return json.loads(fixed)
+        except Exception:
+            return None
+
     def fetch_stock_data(self, symbol: str) -> dict:
         """获取股票数据（多数据源自动切换）"""
         return self._data_fetcher.fetch(symbol)
@@ -79,13 +141,14 @@ ROE：{stock_data.get('roe', 'N/A')}
 Beta：{stock_data.get('beta', 'N/A')}
 """.strip()
 
-        user_prompt = f"请分析以下股票：\n\n{stock_summary}\n\n请用你的投资框架给出独立判断，3-5句话核心观点。"
+        dimensions = investor.get("analysis_dimensions", "请用你的投资框架给出独立判断")
+        user_prompt = f"请分析以下股票：\n\n{stock_summary}\n\n{dimensions}\n\n请给出3-5句话核心观点，每句话聚焦一个维度。"
 
         analysis = self._call_model(
             system_prompt=investor["system_prompt"],
             user_prompt=user_prompt,
             temperature=0.8,
-            max_tokens=600,
+            max_tokens=800,
         )
 
         return {
@@ -134,13 +197,20 @@ Beta：{stock_data.get('beta', 'N/A')}
             "analyses": results,
         }
 
-    def run_debate_round(self, topic: dict, analyses: list, round_num: int) -> dict:
+    def run_debate_round(self, topic: dict, analyses: list, round_num: int, prev_rounds: list = None) -> dict:
         """运行一轮辩论"""
         # 构建辩论上下文
         analyses_text = "\n\n".join([
             f"【{a['emoji']} {a['name']}（{a['faction']}）】：{a['analysis']}"
             for a in analyses
         ])
+
+        # 新增：前轮辩论摘要
+        prev_context = ""
+        if prev_rounds:
+            prev_context = "\n\n以下是之前辩论的结论（请在这些结论基础上继续深入）：\n"
+            for pr in prev_rounds:
+                prev_context += f"\n第{pr['round']}轮「{pr['topic']['title']}」总结：{pr.get('round_summary', '无')}\n"
 
         debate_prompt = f"""现在进行第{round_num}轮辩论。
 
@@ -150,6 +220,7 @@ Beta：{stock_data.get('beta', 'N/A')}
 以下是各位投资大师的独立分析：
 
 {analyses_text}
+{prev_context}
 
 现在请模拟一场真实的辩论。要求：
 1. 采用"你一句我一句"的交替发言方式（不要每人一段连续说完）
@@ -157,6 +228,7 @@ Beta：{stock_data.get('beta', 'N/A')}
 3. 要有交锋感——价值派和交易派应该有观点冲突
 4. 保持各自的说话风格和投资哲学
 5. 辩论3-4个回合后，给出本轮总结
+6. {"不要重复之前已经讨论过的观点，要在前轮基础上推进到更深层次。" if prev_rounds else ""}
 
 请用以下格式输出（JSON）：
 {{"debate": [
@@ -176,15 +248,13 @@ Beta：{stock_data.get('beta', 'N/A')}
             system_prompt=system_prompt,
             user_prompt=debate_prompt,
             temperature=0.85,
-            max_tokens=2000,
+            max_tokens=3000,
         )
 
         try:
-            # 提取 JSON
-            json_str = response.strip()
-            if json_str.startswith("```"):
-                json_str = json_str.split("\n", 1)[1].rsplit("```", 1)[0]
-            debate_data = json.loads(json_str)
+            debate_data = self._extract_json(response)
+            if debate_data is None:
+                raise ValueError("JSON 解析失败")
             return {
                 "topic": topic,
                 "round": round_num,
@@ -211,7 +281,11 @@ Beta：{stock_data.get('beta', 'N/A')}
         summary_prompt = f"""基于以下关于 {stock_data.get('name', symbol)}（{symbol}）的投资辩论，请生成一份结构化总结报告。
 
 股票信息：
-{json.dumps(stock_data, ensure_ascii=False, indent=2)}
+{stock_data.get('name', symbol)}（{symbol}）
+当前价格：${stock_data.get('current_price', 'N/A')}
+市盈率：{stock_data.get('pe_ratio', 'N/A')} | 市净率：{stock_data.get('pb_ratio', 'N/A')}
+ROE：{stock_data.get('roe', 'N/A')} | 营收增长：{stock_data.get('revenue_growth', 'N/A')}
+行业：{stock_data.get('sector', 'N/A')}
 
 辩论记录：
 {all_debates}
@@ -251,7 +325,65 @@ Beta：{stock_data.get('beta', 'N/A')}
             system_prompt=system_prompt,
             user_prompt=summary_prompt,
             temperature=0.5,
-            max_tokens=2000,
+            max_tokens=4000,
+        )
+
+    def generate_final_summary_stream(self, symbol: str, stock_data: dict, debate_results: list):
+        """流式生成最终总结"""
+        all_debates = ""
+        for dr in debate_results:
+            all_debates += f"\n## 辩论议题：{dr['topic']['title']}\n"
+            for stmt in dr.get("statements", []):
+                all_debates += f"- {stmt.get('emoji', '')} {stmt.get('name', '')}（{stmt.get('faction', '')}）：{stmt.get('statement', '')}\n"
+
+        summary_prompt = f"""基于以下关于 {stock_data.get('name', symbol)}（{symbol}）的投资辩论，请生成一份结构化总结报告。
+
+股票信息：
+{stock_data.get('name', symbol)}（{symbol}）
+当前价格：${stock_data.get('current_price', 'N/A')}
+市盈率：{stock_data.get('pe_ratio', 'N/A')} | 市净率：{stock_data.get('pb_ratio', 'N/A')}
+ROE：{stock_data.get('roe', 'N/A')} | 营收增长：{stock_data.get('revenue_growth', 'N/A')}
+行业：{stock_data.get('sector', 'N/A')}
+
+辩论记录：
+{all_debates}
+
+请严格按以下格式输出（使用 Markdown），注意颜色标记：
+
+# 📊 投资辩论总结：{stock_data.get('name', symbol)}（{symbol}）
+
+## 🤝 共识点
+（所有阵营都同意的观点，每条用 [积极] 或 [消极] 标记情感倾向）
+
+## ⚔️ 核心分歧
+（各阵营的主要分歧，用 [看多] [看空] [中性] 标记每方立场）
+
+## 📈 综合评估
+（综合所有视角的评估，利好因素用 [利好] 标记，利空因素用 [利空] 标记）
+
+## ⚠️ 风险提示
+（辩论中提到的关键风险，每条风险用 [高风险] [中风险] [低风险] 标记等级）
+
+## 🎯 行动建议
+（综合建议，区分短期/中期/长期，每条建议用 [推荐] [观望] [不推荐] 标记操作方向）
+
+## 💡 一句话总结
+（用一句话概括最终结论，用 [积极] [谨慎] [消极] 标记整体态度）
+
+颜色标记规则：
+- [利好] [推荐] [积极] [看多] = 正面/乐观/建议买入
+- [利空] [不推荐] [消极] [看空] [高风险] = 负面/悲观/建议回避
+- [观望] [中性] [中风险] [谨慎] = 中性/等待/需要更多信息"""
+
+        system_prompt = """你是一位资深的投资分析师，擅长综合多方观点给出客观、全面的投资分析报告。
+你的报告应该结构清晰、逻辑严密、观点平衡，既不过度乐观也不过度悲观。
+重要：你必须在每条观点前加上颜色标记如 [利好] [利空] [推荐] [不推荐] [观望] [高风险] [中风险] 等，以便读者快速识别观点倾向。"""
+
+        yield from self._call_model_stream(
+            system_prompt=system_prompt,
+            user_prompt=summary_prompt,
+            temperature=0.5,
+            max_tokens=4000,
         )
 
     def run_full_debate(self, symbol: str) -> dict:

@@ -134,6 +134,9 @@ async function startAnalysis() {
         await sleep(400);
 
         // ===== 第2步：7位大师独立分析 =====
+        // 显示骨架屏
+        showAnalysisSkeleton();
+
         setProgress(2, 20, `🧠 巴菲特正在分析...`);
         addLog('开始独立分析（7位大师并行思考中）...');
 
@@ -164,8 +167,7 @@ async function startAnalysis() {
         setProgress(4, 90, `📋 正在生成总结报告...`);
         addLog('综合所有观点，生成最终报告...');
 
-        const step4 = await apiPost('/api/step4-summary', { symbol });
-        renderSummary(step4.summary);
+        await fetchSummaryStream(symbol);
         setProgress(4, 100, `🎉 分析完成！`);
         addLog('全部完成！');
 
@@ -187,7 +189,6 @@ async function startAnalysis() {
         // 在页面上显示错误
         const errDiv = document.createElement('div');
         errDiv.className = 'error-toast';
-        errDiv.style.cssText = 'max-width:700px;margin:20px auto;padding:16px;background:#2a1a1a;border:1px solid #dc2626;border-radius:12px;color:#fca5a5;';
         errDiv.innerHTML = `<strong>❌ 分析失败</strong><br>${escapeHtml(error.message)}<br><br><small>提示：请检查 DeepSeek API Key 是否正确配置</small>`;
         document.getElementById('progressSection').after(errDiv);
     } finally {
@@ -240,7 +241,7 @@ function renderAnalyses(analyses) {
     grid.innerHTML = analyses.map((a, i) => `
         <div class="analysis-card" style="--card-color: ${a.faction_color}; animation-delay: ${i * 0.08}s;"
              data-faction="${a.faction}">
-            <div class="card-header">
+            <div class="card-header" onclick="toggleCard(this)" style="cursor:pointer;">
                 <div class="card-avatar">${a.emoji}</div>
                 <div class="card-info">
                     <div class="card-name">${escapeHtml(a.name)}
@@ -248,9 +249,12 @@ function renderAnalyses(analyses) {
                     </div>
                     <div class="card-name-en">${escapeHtml(a.name_en)}</div>
                 </div>
+                <span class="card-toggle">▼</span>
             </div>
-            <div class="card-tagline">"${escapeHtml(a.tagline)}"</div>
-            <div class="card-analysis">${escapeHtml(a.analysis)}</div>
+            <div class="card-body">
+                <div class="card-tagline">"${escapeHtml(a.tagline)}"</div>
+                <div class="card-analysis">${escapeHtml(a.analysis)}</div>
+            </div>
         </div>
     `).join('');
     showSection('analysisSection');
@@ -264,6 +268,30 @@ function filterFaction(faction) {
     document.querySelectorAll('.analysis-card').forEach(card => {
         card.style.display = (faction === 'all' || card.dataset.faction === faction) ? 'block' : 'none';
     });
+}
+
+// ===== 卡片折叠/展开 =====
+function toggleCard(header) {
+    const body = header.nextElementSibling;
+    const toggle = header.querySelector('.card-toggle');
+    if (body && toggle) {
+        body.classList.toggle('collapsed');
+        toggle.textContent = body.classList.contains('collapsed') ? '▶' : '▼';
+    }
+}
+
+// ===== 骨架屏 =====
+function showAnalysisSkeleton() {
+    const grid = document.getElementById('analysisGrid');
+    grid.innerHTML = Array(7).fill('').map(() => `
+        <div class="skeleton skeleton-card">
+            <div class="skeleton-line" style="width:40%;height:20px;margin-bottom:14px;"></div>
+            <div class="skeleton-line"></div>
+            <div class="skeleton-line"></div>
+            <div class="skeleton-line" style="width:80%;"></div>
+        </div>
+    `).join('');
+    showSection('analysisSection');
 }
 
 // ===== 追加辩论轮次（聊天框形式） =====
@@ -332,8 +360,15 @@ function appendDebateRound(round) {
         container.appendChild(divider);
     }
 
-    // 自动滚动到底部
-    container.scrollTop = container.scrollHeight;
+    // 自动滚动到底部（带延迟确保动画完成）
+    const scrollToBottom = () => {
+        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+    };
+    // 立即滚一次
+    scrollToBottom();
+    // 动画完成后再次滚动
+    setTimeout(scrollToBottom, 500);
+    setTimeout(scrollToBottom, 1000);
 }
 
 // ===== 渲染辩论（全量，兼容旧接口） =====
@@ -370,17 +405,196 @@ function renderSummary(markdown) {
     // 先替换颜色标记，再做 Markdown 转换
     let html = markdown.replace(/\[([^\]]+)\]/g, replaceTag);
 
-    // Markdown 转 HTML
-    html = html
-        .replace(/^# (.+)$/gm, '<h1>$1</h1>')
-        .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-        .replace(/^### (.+)$/gm, '<h3>$1</h3>')
-        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-        .replace(/^- (.+)$/gm, '<li>$1</li>')
-        .replace(/((?:<li>[\s\S]*?<\/li>\s*)+)/g, '<ul>$1</ul>')
-        .replace(/\n\n/g, '<br><br>')
-        .replace(/\n/g, '<br>');
+    // 使用 marked.js 渲染 Markdown
+    if (typeof marked !== 'undefined') {
+        html = marked.parse(html);
+    } else {
+        // 降级：手写正则
+        html = html
+            .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+            .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+            .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+            .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+            .replace(/^- (.+)$/gm, '<li>$1</li>')
+            .replace(/((?:<li>[\s\S]*?<\/li>\s*)+)/g, '<ul>$1</ul>')
+            .replace(/\n\n/g, '<br><br>')
+            .replace(/\n/g, '<br>');
+    }
 
     container.innerHTML = html;
     showSection('summarySection');
 }
+
+// ===== 流式总结（打字机效果） =====
+async function fetchSummaryStream(symbol) {
+    showSection('summarySection');
+    const container = document.getElementById('summaryContent');
+    container.innerHTML = '<span class="typing-cursor"></span>';
+
+    try {
+        const response = await fetch('/api/step4-summary-stream', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ symbol }),
+        });
+
+        if (!response.ok) {
+            const err = await response.json();
+            throw new Error(err.error || '流式请求失败');
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let fullText = '';
+        let renderPending = false;
+
+        function scheduleRender() {
+            if (renderPending) return;
+            renderPending = true;
+            requestAnimationFrame(() => {
+                renderSummaryIncremental(container, fullText);
+                renderPending = false;
+            });
+        }
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n');
+
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    try {
+                        const data = JSON.parse(line.slice(6));
+                        if (data.type === 'token') {
+                            fullText += data.content;
+                            scheduleRender();
+                        }
+                    } catch (e) {
+                        // 忽略解析错误
+                    }
+                }
+            }
+        }
+
+        // 最终渲染
+        renderSummaryIncremental(container, fullText);
+    } catch (error) {
+        if (error.name === 'AbortError') return;
+        container.innerHTML = `<div class="error-toast"><strong>总结生成失败</strong>${escapeHtml(error.message)}</div>`;
+    }
+}
+
+function renderSummaryIncremental(container, markdown) {
+    // 颜色标记映射
+    const positiveTags = ['利好', '推荐', '积极', '看多', '买入', '低风险'];
+    const negativeTags = ['利空', '不推荐', '消极', '看空', '卖出', '高风险', '回避'];
+    const neutralTags = ['观望', '中性', '中风险', '谨慎', '持有', '等待'];
+
+    function replaceTag(match, tag) {
+        const tagText = tag.replace('[', '').replace(']', '');
+        let cls = 'tag-neutral';
+        if (positiveTags.some(t => tagText.includes(t))) cls = 'tag-positive';
+        else if (negativeTags.some(t => tagText.includes(t))) cls = 'tag-negative';
+        else if (neutralTags.some(t => tagText.includes(t))) cls = 'tag-neutral';
+        return `<span class="${cls}">${tagText}</span>`;
+    }
+
+    let html = markdown.replace(/\[([^\]]+)\]/g, replaceTag);
+
+    // 使用 marked.js 渲染 Markdown
+    if (typeof marked !== 'undefined') {
+        html = marked.parse(html);
+    } else {
+        // 降级：手写正则
+        html = html
+            .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+            .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+            .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+            .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+            .replace(/^- (.+)$/gm, '<li>$1</li>')
+            .replace(/((?:<li>[\s\S]*?<\/li>\s*)+)/g, '<ul>$1</ul>')
+            .replace(/\n\n/g, '<br><br>')
+            .replace(/\n/g, '<br>');
+    }
+
+    container.innerHTML = html + '<span class="typing-cursor"></span>';
+}
+
+// ===== 暗色模式 =====
+function toggleTheme() {
+    const html = document.documentElement;
+    const isDark = html.getAttribute('data-theme') === 'dark';
+    html.setAttribute('data-theme', isDark ? 'light' : 'dark');
+    document.getElementById('themeIcon').textContent = isDark ? '🌙' : '☀️';
+    localStorage.setItem('theme', isDark ? 'light' : 'dark');
+}
+
+// ===== 分享/导出 =====
+function copySummary() {
+    const text = document.getElementById('summaryContent').innerText;
+    navigator.clipboard.writeText(text).then(() => {
+        showToast('已复制到剪贴板 ✅');
+    }).catch(() => {
+        // 降级方案
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+        showToast('已复制到剪贴板 ✅');
+    });
+}
+
+async function exportAsImage() {
+    if (typeof html2canvas === 'undefined') {
+        showToast('图片导出库加载失败，请刷新页面重试');
+        return;
+    }
+    showToast('正在生成图片...');
+    try {
+        const element = document.querySelector('.summary-card');
+        const canvas = await html2canvas(element, {
+            backgroundColor: getComputedStyle(document.documentElement).getPropertyValue('--bg-white').trim() || '#ffffff',
+            scale: 2,
+        });
+        const link = document.createElement('a');
+        link.download = `投资辩论总结-${currentSymbol}-${new Date().toISOString().slice(0,10)}.png`;
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+        showToast('图片已保存 ✅');
+    } catch (e) {
+        showToast('导出失败: ' + e.message);
+    }
+}
+
+function showToast(msg) {
+    const existing = document.querySelector('.toast-msg');
+    if (existing) existing.remove();
+
+    const toast = document.createElement('div');
+    toast.className = 'toast-msg';
+    toast.textContent = msg;
+    document.body.appendChild(toast);
+    setTimeout(() => toast.classList.add('show'), 10);
+    setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => toast.remove(), 300);
+    }, 2500);
+}
+
+// 页面加载时恢复主题偏好
+(function() {
+    const saved = localStorage.getItem('theme');
+    if (saved) {
+        document.documentElement.setAttribute('data-theme', saved);
+        // 延迟设置图标，等 DOM 加载完成
+        document.addEventListener('DOMContentLoaded', () => {
+            const icon = document.getElementById('themeIcon');
+            if (icon) icon.textContent = saved === 'dark' ? '☀️' : '🌙';
+        });
+    }
+})();
