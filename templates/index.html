@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>投资辩论竞技场 | Investment Debate Arena</title>
+    <link rel="stylesheet" href="/static/css/style.css?v=4">
+</head>
+<body>
+    <!-- 顶部导航 -->
+    <header class="header">
+        <div class="header-inner">
+            <div class="logo">
+                <span class="logo-icon">🏛️</span>
+                <div class="logo-text-group">
+                    <span class="logo-text">投资辩论竞技场</span>
+                    <span class="logo-sub">7位投资大师 × 1只股票 × 3轮辩论</span>
+                </div>
+            </div>
+            <div class="header-right">
+                <span class="status-badge" id="statusBadge">
+                    <span class="status-dot"></span>
+                    <span>就绪</span>
+                </span>
+            </div>
+        </div>
+    </header>
+
+    <!-- 主内容区 -->
+    <main class="main">
+        <!-- 搜索区域 -->
+        <section class="hero-section">
+            <h1 class="hero-title">让投资大师们为你辩论</h1>
+            <p class="hero-desc">输入任意股票代码，巴菲特、芒格、段永平等 7 位投资大师将独立分析，然后展开三轮激烈辩论，最终给出综合投资建议。</p>
+            <div class="search-box">
+                <div class="search-input-wrap">
+                    <span class="search-icon">🔍</span>
+                    <input type="text" id="stockInput" placeholder="输入股票代码，如 AAPL、TSLA、NVDA..."
+                           autocomplete="off" spellcheck="false">
+                </div>
+                <button id="analyzeBtn" onclick="startAnalysis()" class="btn-primary">
+                    <span>⚔️</span>
+                    <span>开始辩论</span>
+                </button>
+            </div>
+            <div class="quick-tags">
+                <span class="tag-label">热门：</span>
+                <button class="tag" onclick="quickSearch('AAPL')">AAPL</button>
+                <button class="tag" onclick="quickSearch('TSLA')">TSLA</button>
+                <button class="tag" onclick="quickSearch('NVDA')">NVDA</button>
+                <button class="tag" onclick="quickSearch('GOOGL')">GOOGL</button>
+                <button class="tag" onclick="quickSearch('MSFT')">MSFT</button>
+                <button class="tag" onclick="quickSearch('0700.HK')">腾讯</button>
+            </div>
+        </section>
+
+        <!-- 进度指示器 -->
+        <section class="progress-section" id="progressSection" style="display:none;">
+            <div class="progress-steps">
+                <div class="step" id="step1"><div class="step-icon">📊</div><div class="step-label">获取数据</div></div>
+                <div class="step-line"></div>
+                <div class="step" id="step2"><div class="step-icon">🧠</div><div class="step-label">独立分析</div></div>
+                <div class="step-line"></div>
+                <div class="step" id="step3"><div class="step-icon">⚔️</div><div class="step-label">三轮辩论</div></div>
+                <div class="step-line"></div>
+                <div class="step" id="step4"><div class="step-icon">📋</div><div class="step-label">总结报告</div></div>
+            </div>
+            <div class="progress-bar-wrap">
+                <div class="progress-bar" id="progressBar"></div>
+            </div>
+            <div class="progress-text" id="progressText">准备中...</div>
+        </section>
+
+        <!-- 股票信息卡片 -->
+        <section class="stock-section" id="stockInfoSection" style="display:none;">
+            <div class="stock-card">
+                <div class="stock-header">
+                    <div>
+                        <h2 class="stock-name" id="stockName">--</h2>
+                        <div class="stock-meta">
+                            <span class="stock-symbol" id="stockSymbol">--</span>
+                            <span class="stock-sector" id="stockSector">--</span>
+                        </div>
+                    </div>
+                    <div class="stock-price" id="stockPrice">--</div>
+                </div>
+                <div class="stock-metrics" id="stockMetrics"></div>
+            </div>
+        </section>
+
+        <!-- 独立分析 -->
+        <section class="section" id="analysisSection" style="display:none;">
+            <div class="section-header">
+                <h2 class="section-title">🎯 独立分析</h2>
+                <span class="section-desc">每位大师的独立判断</span>
+            </div>
+            <div class="faction-tabs" id="factionTabs">
+                <button class="faction-tab active" data-faction="all" onclick="filterFaction('all')">全部</button>
+                <button class="faction-tab" data-faction="价值派" onclick="filterFaction('价值派')">🏛️ 价值派</button>
+                <button class="faction-tab" data-faction="指数派" onclick="filterFaction('指数派')">📊 指数派</button>
+                <button class="faction-tab" data-faction="交易派" onclick="filterFaction('交易派')">⚡ 交易派</button>
+                <button class="faction-tab" data-faction="杠杆派" onclick="filterFaction('杠杆派')">🚀 杠杆派</button>
+            </div>
+            <div class="analysis-grid" id="analysisGrid"></div>
+        </section>
+
+        <!-- 辩论区域 - 聊天框形式 -->
+        <section class="section" id="debateSection" style="display:none;">
+            <div class="section-header">
+                <h2 class="section-title">⚔️ 辩论现场</h2>
+                <span class="section-desc">三轮议题，各抒己见</span>
+            </div>
+            <div class="chat-container" id="debateRounds">
+                <div class="chat-welcome" id="chatWelcome">
+                    <span>🎭</span> 辩论即将开始，请稍候...
+                </div>
+            </div>
+        </section>
+
+        <!-- 最终总结 -->
+        <section class="section" id="summarySection" style="display:none;">
+            <div class="section-header">
+                <h2 class="section-title">📋 辩论总结</h2>
+            </div>
+            <div class="summary-card" id="summaryContent"></div>
+        </section>
+    </main>
+
+    <!-- 页脚 -->
+    <footer class="footer">
+        <p>投资辩论竞技场 · 仅供参考，不构成投资建议</p>
+    </footer>
+
+    <script src="/static/js/app.js?v=4"></script>
+</body>
+</html>
