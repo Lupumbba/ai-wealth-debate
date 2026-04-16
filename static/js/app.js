@@ -7,6 +7,7 @@
 let currentSymbol = '';
 let currentAnalyses = [];
 let abortController = null; // 用于取消进行中的请求
+let analysisId = 0; // 分析唯一标识，防止旧分析的finally覆盖新分析状态
 
 // ===== 工具函数 =====
 function formatNumber(num, prefix = '', suffix = '') {
@@ -107,6 +108,8 @@ async function startAnalysis() {
     // 中断之前的分析
     cancelCurrentAnalysis();
 
+    // 递增分析ID，旧分析的finally不会影响当前分析
+    const myId = ++analysisId;
     currentSymbol = symbol;
     const btn = document.getElementById('analyzeBtn');
     btn.disabled = true;
@@ -192,8 +195,11 @@ async function startAnalysis() {
         errDiv.innerHTML = `<strong>❌ 分析失败</strong><br>${escapeHtml(error.message)}<br><br><small>提示：请检查 DeepSeek API Key 是否正确配置</small>`;
         document.getElementById('progressSection').after(errDiv);
     } finally {
-        btn.disabled = false;
-        btn.querySelector('span:last-child').textContent = '开始辩论';
+        // 只有当前分析没被中断时，才恢复按钮状态
+        if (myId === analysisId) {
+            btn.disabled = false;
+            btn.querySelector('span:last-child').textContent = '开始辩论';
+        }
     }
 }
 
